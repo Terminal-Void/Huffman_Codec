@@ -27,9 +27,7 @@ namespace {
     FilePtr open_c_file(const fs::path &path, const char *mode) {
         FilePtr file(std::fopen(path.string().c_str(), mode));
         if (!file) {
-            throw std::runtime_error(
-                "无法打开文件：" + path.string()
-            );
+            throw std::runtime_error("无法打开文件：" + path.string());
         }
         return file;
     }
@@ -44,15 +42,9 @@ namespace {
         fs::path leaves = base;
         leaves += ".config2.txt";
 
-        const std::string decoded_name =
-                base.stem().string() + ".decoded" + base.extension().string();
+        const std::string decoded_name = base.stem().string() + ".decoded" + base.extension().string();
 
-        return {
-            archive,
-            shape,
-            leaves,
-            base.parent_path() / decoded_name
-        };
+        return {archive,shape,leaves,base.parent_path() / decoded_name};
     }
 
     void write_uint64(std::ostream &output, std::uint64_t value) {
@@ -151,20 +143,17 @@ ArchiveHeader ArchiveHeader::read(std::istream &input) {
         throw std::runtime_error("不是有效的 Huffman 压缩文件");
     }
 
-    return {
-        read_uint64(input),
-        read_uint64(input)
-    };
+    return {read_uint64(input),read_uint64(input)};
 }
 
 void write_tree_config(
-    Node *node,
+    Node *root,
     std::ostream &shape,
     std::ostream &leaves
 ) {
-    if (node->isLeaf()) {
+    if (root->isLeaf()) {
         shape.put('0');
-        auto *leaf = dynamic_cast<LeafNode<Byte> *>(node);
+        auto *leaf = dynamic_cast<LeafNode<Byte> *>(root);
         if (leaf == nullptr) {
             throw std::logic_error("叶节点类型与 isLeaf() 不一致");
         }
@@ -175,7 +164,7 @@ void write_tree_config(
     }
 
     shape.put('1');
-    auto *internal = dynamic_cast<IntlNode<Byte> *>(node);
+    auto *internal = dynamic_cast<IntlNode<Byte> *>(root);
     if (internal == nullptr) {
         throw std::logic_error("内部节点类型与 isLeaf() 不一致");
     }
@@ -201,8 +190,8 @@ TreeHandle load_tree_config(
     const fs::path &shape_path,
     const fs::path &leaves_path
 ) {
-    FilePtr shape_file = open_c_file(shape_path, "r");
-    FilePtr leaves_file = open_c_file(leaves_path, "r");
+    const FilePtr shape_file = open_c_file(shape_path, "r");
+    const FilePtr leaves_file = open_c_file(leaves_path, "r");
 
     return GenHuffTreeByConfigFile(
         shape_file.get(),

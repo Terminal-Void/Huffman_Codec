@@ -2,6 +2,7 @@
 #include "bit_stream.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <fstream>
 #include <limits>
@@ -19,10 +20,7 @@ namespace {
         std::vector<TreeHandle> items_;
 
         struct Compare {
-            bool operator()(
-                const TreeHandle &left,
-                const TreeHandle &right
-            ) const {
+            bool operator()(const TreeHandle &left, const TreeHandle &right) const {
                 return left->weight() > right->weight();
             }
         };
@@ -59,17 +57,13 @@ namespace {
                 continue;
             }
 
-            if (frequency > static_cast<Frequency>(
-                    std::numeric_limits<int>::max())) {
+            if (frequency > static_cast<Frequency>(std::numeric_limits<int>::max())) {
                 throw std::runtime_error("字符频率超过 HuffTree 的 int 范围");
             }
 
             total += frequency;
             Byte value = static_cast<Byte>(i);
-            heap.push(std::make_unique<HuffTree<Byte> >(
-                value,
-                static_cast<int>(frequency)
-            ));
+            heap.push(std::make_unique<HuffTree<Byte> >(value, static_cast<int>(frequency)));
         }
 
         if (total == 0) {
@@ -85,20 +79,13 @@ namespace {
                 throw std::runtime_error("哈夫曼树权重超过 int 范围");
             }
 
-            heap.push(std::make_unique<HuffTree<Byte> >(
-                std::move(left),
-                std::move(right)
-            ));
+            heap.push(std::make_unique<HuffTree<Byte> >(std::move(left), std::move(right)));
         }
 
         return heap.pop_min();
     }
 
-    void build_codes(
-        Node *node,
-        std::vector<bool> &path,
-        CodeTable &codes
-    ) {
+    void build_codes(Node *node, std::vector<bool> &path, CodeTable &codes) {
         if (node->isLeaf()) {
             auto *leaf = dynamic_cast<LeafNode<Byte> *>(node);
             if (leaf == nullptr) {
@@ -128,10 +115,7 @@ namespace {
         path.pop_back();
     }
 
-    std::uint64_t calculate_payload_bits(
-        const FrequencyTable &frequencies,
-        const CodeTable &codes
-    ) {
+    std::uint64_t calculate_payload_bits(const FrequencyTable &frequencies, const CodeTable &codes) {
         std::uint64_t result = 0;
 
         for (std::size_t i = 0; i < frequencies.size(); ++i) {
@@ -161,8 +145,56 @@ namespace {
     }
 
     void write_code(bitio::BitWriter &writer, const Codeword &code) {
+        std::uint64_t value = 0;
+        unsigned buffered = 0;
+
         for (const bool bit: code.bits) {
-            writer.write_bit(bit);
+            if (bit) {
+                value |= std::uint64_t{1} << buffered;
+            }
+            ++buffered;
+
+            if (buffered == 56) {
+                writer.write_bits(value, buffered);
+                value = 0;
+                buffered = 0;
+            }
+        }
+
+        if (buffered != 0) {
+            writer.write_bits(value, buffered);
+        }
+    }
+
+    std::size_t payload_byte_count(const std::uint64_t bit_count) {
+        if (bit_count > std::numeric_limits<std::uint64_t>::max() - 7) {
+            throw std::runtime_error("压缩位数超过可表示范围");
+        }
+
+        const std::uint64_t bytes = (bit_count + 7) / 8;
+        if (bytes > static_cast<std::uint64_t>(
+                std::numeric_limits<std::size_t>::max())) {
+            throw std::runtime_error("压缩载荷长度无法表示");
+        }
+        return static_cast<std::size_t>(bytes);
+    }
+
+    template<typename Function>
+    void for_each_stream_byte(std::istream &input, Function &&function) {
+        std::array<char, 64U * 1024U> buffer{};
+
+        while (input) {
+            input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            const std::streamsize received = input.gcount();
+            for (std::streamsize i = 0; i < received; ++i) {
+                function(static_cast<Byte>(
+                    static_cast<unsigned char>(buffer[static_cast<std::size_t>(i)])
+                ));
+            }
+        }
+
+        if (input.bad() || (input.fail() && !input.eof())) {
+            throw std::ios_base::failure("读取输入文件失败");
         }
     }
 
@@ -174,6 +206,29 @@ namespace {
     ) {
         std::uint64_t bits_read = 0;
         std::uint64_t bytes_written = 0;
+        std::array<char, 64U * 1024U> output_buffer{};
+        std::size_t output_used = 0;
+
+        const auto flush_output = [&]() {
+            if (output_used == 0) {
+                return;
+            }
+            output.write(
+                output_buffer.data(),
+                static_cast<std::streamsize>(output_used)
+            );
+            if (!output) {
+                throw std::ios_base::failure("写入解压文件失败");
+            }
+            output_used = 0;
+        };
+
+        const auto write_output_byte = [&](const Byte value) {
+            output_buffer[output_used++] = static_cast<char>(value);
+            if (output_used == output_buffer.size()) {
+                flush_output();
+            }
+        };
 
         const auto read_payload_bit = [&]() {
             if (bits_read >= header.payload_bits) {
@@ -194,7 +249,7 @@ namespace {
                 if (read_payload_bit()) {
                     throw std::runtime_error("单节点哈夫曼树的编码无效");
                 }
-                output.put(static_cast<char>(value));
+                write_output_byte(value);
                 ++bytes_written;
             }
         } else {
@@ -224,7 +279,7 @@ namespace {
                 }
 
                 const Byte value = leaf->val();
-                output.put(static_cast<char>(value));
+                write_output_byte(value);
                 ++bytes_written;
             }
         }
@@ -233,9 +288,7 @@ namespace {
             throw std::runtime_error("压缩数据包含多余编码位");
         }
 
-        if (!output) {
-            throw std::ios_base::failure("写入解压文件失败");
-        }
+        flush_output();
     }
 } // namespace
 
@@ -253,16 +306,10 @@ ArchivePaths compress_file(const fs::path &input_path) {
 
     FrequencyTable frequencies{};
     std::uint64_t original_size = 0;
-    char ch;
-
-    while (input.get(ch)) {
-        ++frequencies[static_cast<unsigned char>(ch)];
+    for_each_stream_byte(input, [&](const Byte value) {
+        ++frequencies[value];
         ++original_size;
-    }
-
-    if (input.bad()) {
-        throw std::ios_base::failure("读取输入文件失败");
-    }
+    });
     if (original_size == 0) {
         throw std::runtime_error("不能压缩空文件");
     }
@@ -306,18 +353,43 @@ ArchivePaths compress_file(const fs::path &input_path) {
         throw std::ios_base::failure("无法重新读取输入文件");
     }
 
+    const std::size_t expected_payload_size =
+            payload_byte_count(header.payload_bits);
+    std::vector<Byte> payload;
+    constexpr std::size_t kPayloadBufferSize = 64U * 1024U;
+    payload.reserve(kPayloadBufferSize + 4U);
+    std::size_t emitted_payload_size = 0;
+
     {
-        bitio::BitWriter writer(archive);
-        while (input.get(ch)) {
-            write_code(
-                writer,
-                codes[static_cast<unsigned char>(ch)]
+        const auto drain_payload = [&]() {
+            if (payload.empty()) {
+                return;
+            }
+
+            archive.write(
+                reinterpret_cast<const char *>(payload.data()),
+                static_cast<std::streamsize>(payload.size())
             );
-        }
-        if (input.bad()) {
-            throw std::ios_base::failure("编码时读取输入文件失败");
-        }
+            if (!archive) {
+                throw std::ios_base::failure("写入压缩数据失败");
+            }
+
+            emitted_payload_size += payload.size();
+            payload.clear();
+        };
+        bitio::BitWriter writer(payload);
+        for_each_stream_byte(input, [&](const Byte value) {
+            write_code(writer, codes[value]);
+            if (payload.size() >= kPayloadBufferSize) {
+                drain_payload();
+            }
+        });
         writer.flush();
+        drain_payload();
+    }
+
+    if (emitted_payload_size != expected_payload_size) {
+        throw std::runtime_error("编码位数与载荷长度不一致");
     }
 
     archive.close();
@@ -364,7 +436,8 @@ ArchivePaths decompress_file(const fs::path &archive_path) {
     }
 
     {
-        bitio::BitReader reader(archive);
+        const std::size_t payload_size = payload_byte_count(header.payload_bits);
+        bitio::BitReader reader(archive, payload_size);
         decode_payload(
             reader,
             decoded,
