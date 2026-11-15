@@ -15,6 +15,7 @@ namespace fs = std::filesystem;
 using Node = HuffNode<Byte>;
 
 namespace {
+    // 承载哈夫曼子树的小根堆
     class MinHeap {
     private:
         std::vector<TreeHandle> items_;
@@ -26,14 +27,15 @@ namespace {
         };
 
     public:
+
         void push(TreeHandle tree) {
             items_.push_back(std::move(tree));
             std::push_heap(items_.begin(), items_.end(), Compare{});
         }
 
-        TreeHandle pop_min() {
+        TreeHandle pop() {
             if (items_.empty()) {
-                throw std::runtime_error("哈夫曼堆为空");
+                throw std::runtime_error("哈夫曼子树堆为空");
             }
 
             std::pop_heap(items_.begin(), items_.end(), Compare{});
@@ -47,8 +49,9 @@ namespace {
         }
     };
 
+    // 每个堆元素作为一棵子树；合并子树时转移所有权至新根节点
     TreeHandle build_tree(const FrequencyTable &frequencies) {
-        MinHeap heap;
+        MinHeap heap; // 小根堆
         std::uint64_t total = 0;
 
         for (std::size_t i = 0; i < frequencies.size(); ++i) {
@@ -58,7 +61,7 @@ namespace {
             }
 
             if (frequency > static_cast<Frequency>(std::numeric_limits<int>::max())) {
-                throw std::runtime_error("字符频率超过 HuffTree 的 int 范围");
+                throw std::runtime_error("字符频率超过 int 范围");
             }
 
             total += frequency;
@@ -67,52 +70,60 @@ namespace {
         }
 
         if (total == 0) {
-            throw std::runtime_error("不能为没有字符的文件建立哈夫曼树");
+            throw std::runtime_error("无法为空文件建立哈夫曼树");
         }
 
         while (heap.size() > 1) {
-            TreeHandle left = heap.pop_min();
-            TreeHandle right = heap.pop_min();
+            TreeHandle left = heap.pop();
+            TreeHandle right = heap.pop();
 
-            if (left->weight() >
-                std::numeric_limits<int>::max() - right->weight()) {
+            if (left->weight() > std::numeric_limits<int>::max() - right->weight()) {
                 throw std::runtime_error("哈夫曼树权重超过 int 范围");
             }
-
+            // 合并子树，将子树的所有权转移至根
             heap.push(std::make_unique<HuffTree<Byte> >(std::move(left), std::move(right)));
         }
 
-        return heap.pop_min();
+        return heap.pop();
     }
 
-    void build_codes(Node *node, std::vector<bool> &path, CodeTable &codes) {
+    // build_codes 的递归 helper
+    void build_codes_recursive(Node *node,std::vector<bool> &path,CodeTable &codes) {
         if (node->isLeaf()) {
-            auto *leaf = dynamic_cast<LeafNode<Byte> *>(node);
+            const auto *leaf = dynamic_cast<LeafNode<Byte> *>(node);
             if (leaf == nullptr) {
                 throw std::logic_error("叶节点类型与 isLeaf() 不一致");
             }
-            Codeword &code = codes[leaf->val()];
-            code.bits = path;
+            auto &[bits] = codes[leaf->val()];
+            bits = path;
 
-            // 单字符文件也使用一个明确的 0 编码位。
-            if (code.bits.empty()) {
-                code.bits.push_back(false);
+            // 由于作业指定的 hufftree 实现
+            // 导致需要特殊逻辑处理全文只有一种字符文件
+            // 此处使用 0 编码位
+            if (bits.empty()) {
+                bits.push_back(false);
             }
             return;
         }
 
-        auto *internal = dynamic_cast<IntlNode<Byte> *>(node);
+        const auto *internal = dynamic_cast<IntlNode<Byte> *>(node);
         if (internal == nullptr) {
             throw std::logic_error("内部节点类型与 isLeaf() 不一致");
         }
 
         path.push_back(false);
-        build_codes(internal->left(), path, codes);
+        build_codes_recursive(internal->left(), path, codes);
         path.pop_back();
 
         path.push_back(true);
-        build_codes(internal->right(), path, codes);
+        build_codes_recursive(internal->right(), path, codes);
         path.pop_back();
+    }
+
+    // 从哈夫曼树，建立字节对应哈夫曼编码的列表，保存在 codes
+    void build_codes(const HuffTree<Byte>& tree, CodeTable &codes) {
+        std::vector<bool> path;
+        build_codes_recursive(tree.root(), path, codes);
     }
 
     std::uint64_t calculate_payload_bits(const FrequencyTable &frequencies, const CodeTable &codes) {
@@ -148,6 +159,7 @@ namespace {
         std::uint64_t value = 0;
         unsigned buffered = 0;
 
+        // 码表仍按位保存，这里分成不超过 56 位的片段交给位写入器。
         for (const bool bit: code.bits) {
             if (bit) {
                 value |= std::uint64_t{1} << buffered;
@@ -179,6 +191,7 @@ namespace {
         return static_cast<std::size_t>(bytes);
     }
 
+    // 带 buffer 的逐字节处理器，传入自定义函数
     template<typename Function>
     void for_each_stream_byte(std::istream &input, Function &&function) {
         std::array<char, 64U * 1024U> buffer{};
@@ -201,14 +214,16 @@ namespace {
     void decode_payload(
         bitio::BitReader &reader,
         std::ostream &output,
-        Node *root,
+        const HuffTree<Byte> &tree,
         const ArchiveHeader &header
     ) {
+        Node *root = tree.root();
         std::uint64_t bits_read = 0;
         std::uint64_t bytes_written = 0;
         std::array<char, 64U * 1024U> output_buffer{};
         std::size_t output_used = 0;
 
+        // 解码结果先写入固定大小的缓冲，再提交给目标文件。
         const auto flush_output = [&]() {
             if (output_used == 0) {
                 return;
@@ -292,104 +307,86 @@ namespace {
     }
 } // namespace
 
+// 压缩文件，并结构体返回压缩文件相关的路径组方便在主循环中打印具体信息
 ArchivePaths compress_file(const fs::path &input_path) {
+    // 检查文件合法性
     if (!fs::exists(input_path) || !fs::is_regular_file(input_path)) {
-        throw std::runtime_error("输入路径不是普通文件");
+        throw std::runtime_error("输入路径不存在或不是普通文件");
     }
-
+    // 根据输入文件路径生成路径组
     const ArchivePaths paths = ArchivePaths::from_input(input_path);
 
+    // 打开输入文件流
     std::ifstream input(input_path, std::ios::binary);
     if (!input) {
         throw std::ios_base::failure("无法打开输入文件");
     }
 
-    FrequencyTable frequencies{};
-    std::uint64_t original_size = 0;
+    FrequencyTable frequencies{}; // 字节频率表
+    std::uint64_t original_size = 0; // 文件字节数
+
+    // 对每个字节累计频率和字节数
     for_each_stream_byte(input, [&](const Byte value) {
         ++frequencies[value];
         ++original_size;
     });
+
     if (original_size == 0) {
         throw std::runtime_error("不能压缩空文件");
     }
 
+    // 根据频率表建树，并导出具体编码到编码表 codes
     TreeHandle tree = build_tree(frequencies);
     CodeTable codes{};
-    std::vector<bool> path;
-    build_codes(tree->root(), path, codes);
+    build_codes(*tree, codes);
 
+    // 文件头部信息
     const ArchiveHeader header{
         original_size,
         calculate_payload_bits(frequencies, codes)
     };
 
+    // 创建树配置文件
     std::ofstream shape(paths.shape, std::ios::trunc);
     std::ofstream leaves(paths.leaves, std::ios::trunc);
     if (!shape || !leaves) {
         throw std::ios_base::failure("无法创建树配置文件");
     }
 
-    write_tree_config(tree->root(), shape, leaves);
+    // 写入树配置文件
+    write_tree_config(*tree, shape, leaves);
     shape.flush();
     leaves.flush();
     if (!shape || !leaves) {
         throw std::ios_base::failure("写入树配置文件失败");
     }
 
-    std::ofstream archive(
-        paths.archive,
-        std::ios::binary | std::ios::trunc
-    );
+    // 创建压缩文件
+    std::ofstream archive(paths.archive, std::ios::binary | std::ios::trunc);
     if (!archive) {
         throw std::ios_base::failure("无法创建压缩文件");
     }
-
+    // 写入压缩文件头
     header.write(archive);
 
+    // 从头重新读取待压缩文件并编码
     input.clear();
     input.seekg(0, std::ios::beg);
     if (!input) {
         throw std::ios_base::failure("无法重新读取输入文件");
     }
 
-    const std::size_t expected_payload_size =
-            payload_byte_count(header.payload_bits);
-    std::vector<Byte> payload;
-    constexpr std::size_t kPayloadBufferSize = 64U * 1024U;
-    payload.reserve(kPayloadBufferSize + 4U);
-    std::size_t emitted_payload_size = 0;
+    const std::size_t expected_payload_size = payload_byte_count(header.payload_bits);
 
     {
-        const auto drain_payload = [&]() {
-            if (payload.empty()) {
-                return;
-            }
-
-            archive.write(
-                reinterpret_cast<const char *>(payload.data()),
-                static_cast<std::streamsize>(payload.size())
-            );
-            if (!archive) {
-                throw std::ios_base::failure("写入压缩数据失败");
-            }
-
-            emitted_payload_size += payload.size();
-            payload.clear();
-        };
-        bitio::BitWriter writer(payload);
+        bitio::BitWriter writer(archive);
         for_each_stream_byte(input, [&](const Byte value) {
             write_code(writer, codes[value]);
-            if (payload.size() >= kPayloadBufferSize) {
-                drain_payload();
-            }
         });
         writer.flush();
-        drain_payload();
-    }
-
-    if (emitted_payload_size != expected_payload_size) {
-        throw std::runtime_error("编码位数与载荷长度不一致");
+        if (writer.written_bytes() != expected_payload_size) {
+            throw std::runtime_error("编码位数与载荷长度不一致");
+        }
     }
 
     archive.close();
@@ -438,12 +435,7 @@ ArchivePaths decompress_file(const fs::path &archive_path) {
     {
         const std::size_t payload_size = payload_byte_count(header.payload_bits);
         bitio::BitReader reader(archive, payload_size);
-        decode_payload(
-            reader,
-            decoded,
-            tree->root(),
-            header
-        );
+        decode_payload(reader,decoded,*tree,header);
     }
 
     decoded.close();

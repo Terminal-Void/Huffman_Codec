@@ -14,6 +14,7 @@ using Node = HuffNode<Byte>;
 namespace {
     constexpr std::array<char, 4> kMagic = {'H', 'U', 'F', '1'};
 
+    // GenHuffTreeByConfigFile 使用 FILE*，这里用 unique_ptr 接管关闭操作。
     struct FileCloser {
         void operator()(FILE *file) const noexcept {
             if (file != nullptr) {
@@ -24,15 +25,8 @@ namespace {
 
     using FilePtr = std::unique_ptr<FILE, FileCloser>;
 
-    FilePtr open_c_file(const fs::path &path, const char *mode) {
-        FilePtr file(std::fopen(path.string().c_str(), mode));
-        if (!file) {
-            throw std::runtime_error("无法打开文件：" + path.string());
-        }
-        return file;
-    }
-
     ArchivePaths make_paths_from_base(const fs::path &base) {
+        // 配置文件沿用原文件名，解压文件在扩展名前插入 .decoded。
         fs::path archive = base;
         archive += ".huf";
 
@@ -48,6 +42,7 @@ namespace {
     }
 
     void write_uint64(std::ostream &output, std::uint64_t value) {
+        // 文件头统一使用小端序，与主机字节序无关。
         for (int i = 0; i < 8; ++i) {
             output.put(static_cast<char>((value >> (i * 8)) & 0xffU));
         }
@@ -71,7 +66,9 @@ namespace {
         return value;
     }
 
+    // 递归从文件生成树结构
     std::unique_ptr<Node> parse_tree_node(FILE *shape, FILE *leaves) {
+        // config1 按先序保存树形：1 表示内部节点，0 表示叶节点。
         const int marker = std::fgetc(shape);
         if (marker == EOF) {
             throw std::runtime_error("树结构文件提前结束");
@@ -102,15 +99,33 @@ namespace {
         );
     }
 
-    void ensure_config_files_end(FILE *shape, FILE *leaves) {
-        if (std::fgetc(shape) != EOF || std::ferror(shape)) {
-            throw std::runtime_error("树结构文件包含多余内容");
+    void write_tree_config_recursive(
+        Node *root,
+        std::ostream &shape,
+        std::ostream &leaves
+    ) {
+        // 叶节点只写形状标记和对应字节。
+        if (root->isLeaf()) {
+            shape.put('0');
+            const auto *leaf = dynamic_cast<LeafNode<Byte> *>(root);
+            if (leaf == nullptr) {
+                throw std::logic_error("叶节点类型与 isLeaf() 不一致");
+            }
+
+            leaves.put(static_cast<char>(leaf->val()));
+            return;
         }
 
-        if (std::fgetc(leaves) != EOF || std::ferror(leaves)) {
-            throw std::runtime_error("叶节点信息文件包含多余内容");
+        shape.put('1');
+        const auto *internal = dynamic_cast<IntlNode<Byte> *>(root);
+        if (internal == nullptr) {
+            throw std::logic_error("内部节点类型与 isLeaf() 不一致");
         }
+
+        write_tree_config_recursive(internal->left(), shape, leaves);
+        write_tree_config_recursive(internal->right(), shape, leaves);
     }
+
 } // namespace
 
 ArchivePaths ArchivePaths::from_input(const fs::path &input) {
@@ -147,29 +162,11 @@ ArchiveHeader ArchiveHeader::read(std::istream &input) {
 }
 
 void write_tree_config(
-    Node *root,
+    const HuffTree<Byte> &tree,
     std::ostream &shape,
     std::ostream &leaves
 ) {
-    if (root->isLeaf()) {
-        shape.put('0');
-        auto *leaf = dynamic_cast<LeafNode<Byte> *>(root);
-        if (leaf == nullptr) {
-            throw std::logic_error("叶节点类型与 isLeaf() 不一致");
-        }
-
-        const auto value = static_cast<char>(leaf->val());
-        leaves.put(value);
-        return;
-    }
-
-    shape.put('1');
-    auto *internal = dynamic_cast<IntlNode<Byte> *>(root);
-    if (internal == nullptr) {
-        throw std::logic_error("内部节点类型与 isLeaf() 不一致");
-    }
-    write_tree_config(internal->left(), shape, leaves);
-    write_tree_config(internal->right(), shape, leaves);
+    write_tree_config_recursive(tree.root(), shape, leaves);
 }
 
 TreeHandle GenHuffTreeByConfigFile(
@@ -181,17 +178,28 @@ TreeHandle GenHuffTreeByConfigFile(
     }
 
     auto root = parse_tree_node(shape_file, leaves_file);
-    ensure_config_files_end(shape_file, leaves_file);
+
+    if (std::fgetc(shape_file) != EOF || std::ferror(shape_file)) {
+        throw std::runtime_error("树结构文件包含多余内容");
+    }
+
+    if (std::fgetc(leaves_file) != EOF || std::ferror(leaves_file)) {
+        throw std::runtime_error("叶节点信息文件包含多余内容");
+    }
 
     return std::make_unique<HuffTree<Byte> >(std::move(root));
 }
 
-TreeHandle load_tree_config(
-    const fs::path &shape_path,
-    const fs::path &leaves_path
-) {
-    const FilePtr shape_file = open_c_file(shape_path, "r");
-    const FilePtr leaves_file = open_c_file(leaves_path, "r");
+TreeHandle load_tree_config(const fs::path &shape_path,const fs::path &leaves_path) {
+
+    const FilePtr shape_file(std::fopen(shape_path.string().c_str(), "r"));
+    if (!shape_file) {
+        throw std::runtime_error("无法打开树结构文件：" + shape_path.string());
+    }
+    const FilePtr leaves_file(std::fopen(leaves_path.string().c_str(), "r"));
+    if (!leaves_file) {
+        throw std::runtime_error("无法打开叶节点信息文件：" + leaves_path.string());
+    }
 
     return GenHuffTreeByConfigFile(
         shape_file.get(),

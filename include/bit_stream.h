@@ -4,11 +4,15 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <ios>
 #include <istream>
+#include <ostream>
 #include <stdexcept>
-#include <vector>
 
 namespace bitio {
+    // LSB/MSB 小/大端序
+    // 写入文件时，字节内第一位的方向
+    // 对于压缩文件来说，通常使用 LSB
     enum class BitOrder {
         LSB,
         MSB
@@ -28,12 +32,11 @@ namespace bitio {
         }
     }
 
-    // 位写入器借用 output，不拥有也不释放 output 的内存。
-    // 累积器最多保留 31 位，满 32 位后批量排出四个字节。
+    // output 由调用者持有；写入器只负责批量写入和刷新。
     template<BitOrder Order = BitOrder::LSB>
     class BasicBitWriter {
     public:
-        explicit BasicBitWriter(std::vector<std::uint8_t> &output) noexcept
+        explicit BasicBitWriter(std::ostream &output) noexcept
             : output_(output) {
         }
 
@@ -49,9 +52,13 @@ namespace bitio {
             write_bits(byte, 8);
         }
 
-        // 写入 value 的低 bit_count 位；MSB 模式下这些位按高位到低位输出。
+        // 写入 value 的低 bit_count 位。累积器满 32 位时立即追加四个字节。
         void write_bits(std::uint64_t value, unsigned bit_count) {
-            assert(bit_count <= 64);
+            if (bit_count > 64) {
+                throw std::invalid_argument(
+                    "bitio::BitWriter: bit count must not exceed 64"
+                );
+            }
             if (bit_count == 0) {
                 return;
             }
@@ -80,7 +87,7 @@ namespace bitio {
             }
         }
 
-        // 补零到字节边界并写入最后一个字节。重复调用不会重复追加数据。
+        // 结束当前位段；最后一个字节不足的高位（或低位）补零。
         void flush() {
             if (buffered_bits_ >= 8) {
                 flush_bytes();
@@ -88,19 +95,27 @@ namespace bitio {
 
             if (buffered_bits_ != 0) {
                 if constexpr (Order == BitOrder::LSB) {
-                    output_.push_back(static_cast<std::uint8_t>(accumulator_ & 0xffU));
+                    append_byte(static_cast<std::uint8_t>(accumulator_ & 0xffU));
                 } else {
-                    output_.push_back(
+                    append_byte(
                         static_cast<std::uint8_t>((accumulator_ >> 24U) & 0xffU)
                     );
                 }
                 accumulator_ = 0;
                 buffered_bits_ = 0;
             }
+
+            flush_output_buffer();
+            output_.flush();
+            check_output("bitio::BitWriter: failed to flush output stream");
         }
 
         [[nodiscard]] unsigned pending_bits() const noexcept {
             return buffered_bits_;
+        }
+
+        [[nodiscard]] std::size_t written_bytes() const noexcept {
+            return bytes_written_;
         }
 
         static constexpr BitOrder bit_order() noexcept {
@@ -108,24 +123,53 @@ namespace bitio {
         }
 
     private:
+        static constexpr std::size_t kOutputBufferSize = 64U * 1024U;
+
+        void append_byte(const std::uint8_t byte) {
+            output_buffer_[output_used_++] = byte;
+            ++bytes_written_;
+            if (output_used_ == output_buffer_.size()) {
+                flush_output_buffer();
+            }
+        }
+
+        void flush_output_buffer() {
+            if (output_used_ == 0) {
+                return;
+            }
+
+            output_.write(
+                reinterpret_cast<const char *>(output_buffer_.data()),
+                static_cast<std::streamsize>(output_used_)
+            );
+            check_output("bitio::BitWriter: failed to write output buffer");
+            output_used_ = 0;
+        }
+
+        void check_output(const char *message) const {
+            if (!output_) {
+                throw std::ios_base::failure(message);
+            }
+        }
+
         void flush_word() {
             if constexpr (Order == BitOrder::LSB) {
-                output_.push_back(static_cast<std::uint8_t>(accumulator_ & 0xffU));
-                output_.push_back(static_cast<std::uint8_t>((accumulator_ >> 8U) & 0xffU));
-                output_.push_back(static_cast<std::uint8_t>((accumulator_ >> 16U) & 0xffU));
-                output_.push_back(static_cast<std::uint8_t>((accumulator_ >> 24U) & 0xffU));
+                append_byte(static_cast<std::uint8_t>(accumulator_ & 0xffU));
+                append_byte(static_cast<std::uint8_t>((accumulator_ >> 8U) & 0xffU));
+                append_byte(static_cast<std::uint8_t>((accumulator_ >> 16U) & 0xffU));
+                append_byte(static_cast<std::uint8_t>((accumulator_ >> 24U) & 0xffU));
                 accumulator_ >>= 32U;
             } else {
-                output_.push_back(
+                append_byte(
                     static_cast<std::uint8_t>((accumulator_ >> 24U) & 0xffU)
                 );
-                output_.push_back(
+                append_byte(
                     static_cast<std::uint8_t>((accumulator_ >> 16U) & 0xffU)
                 );
-                output_.push_back(
+                append_byte(
                     static_cast<std::uint8_t>((accumulator_ >> 8U) & 0xffU)
                 );
-                output_.push_back(static_cast<std::uint8_t>(accumulator_ & 0xffU));
+                append_byte(static_cast<std::uint8_t>(accumulator_ & 0xffU));
                 accumulator_ <<= 32U;
             }
             buffered_bits_ = 0;
@@ -134,10 +178,10 @@ namespace bitio {
         void flush_bytes() {
             while (buffered_bits_ >= 8) {
                 if constexpr (Order == BitOrder::LSB) {
-                    output_.push_back(static_cast<std::uint8_t>(accumulator_ & 0xffU));
+                    append_byte(static_cast<std::uint8_t>(accumulator_ & 0xffU));
                     accumulator_ >>= 8U;
                 } else {
-                    output_.push_back(
+                    append_byte(
                         static_cast<std::uint8_t>((accumulator_ >> 24U) & 0xffU)
                     );
                     accumulator_ <<= 8U;
@@ -146,35 +190,19 @@ namespace bitio {
             }
         }
 
-        std::vector<std::uint8_t> &output_;
+        std::ostream &output_;
+        std::array<std::uint8_t, kOutputBufferSize> output_buffer_{};
+        std::size_t output_used_ = 0;
+        std::size_t bytes_written_ = 0;
         std::uint64_t accumulator_ = 0;
         unsigned buffered_bits_ = 0;
     };
 
-    // 位读取器借用连续内存，调用者必须保证 input 在读取期间有效。
+    // 读取器借用输入流，不负责打开或关闭流。
     template<BitOrder Order = BitOrder::LSB>
     class BasicBitReader {
     public:
-        BasicBitReader(const std::uint8_t *input, const std::size_t size)
-            : current_(&empty_byte_), end_(&empty_byte_) {
-            if (input == nullptr) {
-                if (size != 0) {
-                    throw std::invalid_argument(
-                        "bitio::BitReader: null input with non-zero size"
-                    );
-                }
-                return;
-            }
-
-            current_ = input;
-            end_ = input + size;
-        }
-
-        explicit BasicBitReader(const std::vector<std::uint8_t> &input)
-            : BasicBitReader(input.data(), input.size()) {
-        }
-
-        // 流式读取器只保留固定大小的输入缓冲，不会把整个文件载入内存。
+        // byte_count 限制本次读取范围，避免读到载荷之后的内容。
         BasicBitReader(std::istream &input, const std::size_t byte_count) noexcept
             : source_(&input), source_remaining_(byte_count) {
         }
@@ -187,8 +215,13 @@ namespace bitio {
             return static_cast<std::uint8_t>(read_bits(8));
         }
 
-        [[nodiscard]] std::uint64_t read_bits(unsigned bit_count) {
-            assert(bit_count <= 64);
+        // 一次读取超过 56 位时分两段处理，避免累积器移位越界。
+        [[nodiscard]] std::uint64_t read_bits(const unsigned bit_count) {
+            if (bit_count > 64) {
+                throw std::invalid_argument(
+                    "bitio::BitReader: bit count must not exceed 64"
+                );
+            }
             if (bit_count == 0) {
                 return 0;
             }
@@ -219,9 +252,13 @@ namespace bitio {
             return result;
         }
 
-        // 预览后续位，不改变逻辑读取位置；必要时只补充内部缓存。
+        // 预览后续位；补充缓存不会推进逻辑读取位置。
         [[nodiscard]] std::uint64_t peek_bits(const unsigned bit_count) {
-            assert(bit_count <= 56);
+            if (bit_count > 56) {
+                throw std::invalid_argument(
+                    "bitio::BitReader: peek count must not exceed 56"
+                );
+            }
             if (bit_count == 0) {
                 return 0;
             }
@@ -248,8 +285,7 @@ namespace bitio {
         }
 
         void align_to_byte() {
-            const unsigned remainder = buffered_bits_ & 7U;
-            if (remainder != 0) {
+            if (const unsigned remainder = buffered_bits_ & 7U; remainder != 0) {
                 consume_bits(remainder);
             }
         }
@@ -263,15 +299,10 @@ namespace bitio {
         }
 
     private:
-        inline static constexpr std::uint8_t empty_byte_ = 0;
         static constexpr std::size_t kInputBufferSize = 64U * 1024U;
 
         void refill_source() {
-            if (source_ == nullptr) {
-                throw std::runtime_error(
-                    "bitio::BitReader: input buffer is exhausted"
-                );
-            }
+            assert(source_ != nullptr);
             if (source_remaining_ == 0 || source_short_) {
                 throw std::runtime_error(
                     "bitio::BitReader: unexpected end of bit stream"
@@ -300,8 +331,7 @@ namespace bitio {
             current_ = source_buffer_.data();
             end_ = current_ + received_size;
 
-            // std::istream::read 在短读时可能设置 eofbit/failbit；已经取得的
-            // 字节仍然可以消费，下一次 refill_source() 会报告截断。
+            // 短读得到的字节仍可消费；下一次补充时报告输入截断。
             if (source_short_ && !source_->bad()) {
                 source_->clear();
             }
@@ -310,21 +340,10 @@ namespace bitio {
         void ensure(const unsigned required) {
             while (buffered_bits_ < required) {
                 if (current_ == end_) {
-                    if (source_ != nullptr) {
-                        refill_source();
-                    } else {
-                        throw std::runtime_error(
-                            "bitio::BitReader: unexpected end of bit stream"
-                        );
-                    }
+                    refill_source();
                 }
 
-                // 读取 56 位以内时，最多再装入一个字节，累积器不会溢出。
-                if (buffered_bits_ > 56) {
-                    throw std::logic_error(
-                        "bitio::BitReader: accumulator invariant violated"
-                    );
-                }
+                assert(buffered_bits_ <= 56);
 
                 const std::uint8_t byte = *current_++;
                 if constexpr (Order == BitOrder::LSB) {

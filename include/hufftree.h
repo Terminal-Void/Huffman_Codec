@@ -42,6 +42,7 @@ public:
             );
         }
 
+        // 将子树的根节点所有权转移到新树，从而子树可以自由析构
         Root = std::make_unique<IntlNode<E> >(
             std::move(l->Root),
             std::move(r->Root)

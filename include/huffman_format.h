@@ -17,13 +17,9 @@ struct ArchivePaths {
     std::filesystem::path leaves;
     std::filesystem::path decoded;
 
-    static ArchivePaths from_input(
-        const std::filesystem::path &input
-    );
+    static ArchivePaths from_input(const std::filesystem::path &input);
 
-    static ArchivePaths from_archive(
-        const std::filesystem::path &archive
-    );
+    static ArchivePaths from_archive(const std::filesystem::path &archive);
 };
 
 struct ArchiveHeader {
@@ -35,18 +31,10 @@ struct ArchiveHeader {
     static ArchiveHeader read(std::istream &input);
 };
 
-void write_tree_config(
-    HuffNode<Byte> *root,
-    std::ostream &shape,
-    std::ostream &leaves
-);
+void write_tree_config(const HuffTree<Byte> &tree, std::ostream &shape,
+                       std::ostream &leaves);
 
-TreeHandle load_tree_config(
-    const std::filesystem::path &shape_path,
-    const std::filesystem::path &leaves_path
-);
+TreeHandle load_tree_config(const std::filesystem::path &shape_path,
+                            const std::filesystem::path &leaves_path);
 
-TreeHandle GenHuffTreeByConfigFile(
-    FILE *shape_file,
-    FILE *leaves_file
-);
+TreeHandle GenHuffTreeByConfigFile(FILE *shape_file, FILE *leaves_file);
