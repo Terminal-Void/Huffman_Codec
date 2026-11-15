@@ -5,7 +5,9 @@
 
 // Huffman tree node abstract base class
 #pragma once
+#include <limits>
 #include <memory>
+#include <stdexcept>
 #include <utility>
 
 template<typename E>
@@ -24,10 +26,25 @@ private:
     NodePtr lc; // Left child
     NodePtr rc; // Right child
     int wgt; // Subtree weight
+
+    static int sum_weights(const NodePtr &l, const NodePtr &r) {
+        if (l == nullptr || r == nullptr) {
+            throw std::invalid_argument("IntlNode: child node cannot be null");
+        }
+        const int lw = l->weight();
+        const int rw = r->weight();
+        if ((lw >= 0 && rw > std::numeric_limits<int>::max() - lw) ||
+            (lw < 0 && rw < std::numeric_limits<int>::min() - lw)) {
+            throw std::overflow_error("IntlNode: weight overflow");
+        }
+        return lw + rw;
+    }
+
 public:
-    IntlNode(NodePtr l, NodePtr r) : lc(std::move(l)),
-                                     rc(std::move(r)),
-                                     wgt(lc->weight() + rc->weight()) {
+    IntlNode(NodePtr l, NodePtr r)
+        : lc(std::move(l)),
+          rc(std::move(r)),
+          wgt(sum_weights(lc, rc)) {
     }
 
     int weight() override { return wgt; }
@@ -45,9 +62,7 @@ private:
     int wgt; // Weight
 public:
     LeafNode(const E &val, const int freq) // Constructor
-    {
-        it = val;
-        wgt = freq;
+        : it(val), wgt(freq) {
     }
 
     int weight() override { return wgt; }

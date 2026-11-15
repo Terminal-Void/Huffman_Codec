@@ -7,6 +7,7 @@
 //  type being coded and a comparator for two such elements.
 
 #pragma once
+#include <cassert>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -19,7 +20,7 @@ private:
 public:
     using NodePtr = std::unique_ptr<HuffNode<E> >;
 
-    HuffTree(E &val, int freq) // Leaf constructor
+    HuffTree(const E &val, int freq) // Leaf constructor
         : Root(std::make_unique<LeafNode<E> >(val, freq)) {
     }
 
@@ -59,9 +60,8 @@ public:
     HuffTree &operator=(HuffTree &&) noexcept = default;
 
     HuffNode<E> *root() const { return Root.get(); } // Get root
-    [[nodiscard]] int weight() const { return Root->weight(); } // Root weight
-
-    NodePtr release_root() noexcept {
-        return std::move(Root);
-    }
+    [[nodiscard]] int weight() const {
+        assert(Root != nullptr);
+        return Root->weight();
+    } // Root weight
 };

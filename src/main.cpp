@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <string_view>
 
 namespace fs = std::filesystem;
 
@@ -43,12 +44,32 @@ namespace {
 )";
     }
 
-    // 提示用户输入路径，读取并转换为 fs::path 后返回
+    std::string_view trim_ascii(const std::string_view text) noexcept {
+        const auto first = text.find_first_not_of(" \t\r\n");
+        if (first == std::string_view::npos) {
+            return {};
+        }
+        const auto last = text.find_last_not_of(" \t\r\n");
+        return text.substr(first, last - first + 1);
+    }
+
+    // 提示用户输入路径，读取并清理首尾空白及成对引号后返回
     fs::path read_path(const char *prompt) {
         std::cout << prompt;
-        std::string text;
-        std::getline(std::cin >> std::ws, text);
-        return {text};
+        std::string line;
+        if (!std::getline(std::cin, line)) {
+            return {};
+        }
+
+        std::string_view path_view = trim_ascii(line);
+        if (path_view.size() >= 2 &&
+            ((path_view.front() == '"' && path_view.back() == '"') ||
+             (path_view.front() == '\'' && path_view.back() == '\''))) {
+            path_view.remove_prefix(1);
+            path_view.remove_suffix(1);
+        }
+
+        return {path_view};
     }
 } // namespace
 
@@ -57,19 +78,31 @@ int main() {
     print_help();
 
     // 主循环
-    std::string choice;
-    while (std::cout << "\n> " && std::getline(std::cin >> std::ws, choice)) {
+    std::string line;
+    while (std::cout << "\n> " && std::getline(std::cin, line)) {
+        const std::string_view choice = trim_ascii(line);
+        if (choice.empty()) {
+            continue;
+        }
         try {
             if (choice == "c" || choice == "compress") {
                 // 压缩
-                const ArchivePaths paths = compress_file(read_path("请输入原文件路径: "));
+                const fs::path input_path = read_path("请输入原文件路径: ");
+                if (!std::cin && input_path.empty()) {
+                    break;
+                }
+                const ArchivePaths paths = compress_file(input_path);
                 std::cout << "压缩完成：\n"
                         << "  压缩文件    " << paths.archive.string() << '\n'
                         << "  树结构文件  " << paths.shape.string() << '\n'
                         << "  叶节点文件  " << paths.leaves.string() << '\n';
             } else if (choice == "x" || choice == "extract") {
                 // 解压缩
-                const ArchivePaths paths = decompress_file(read_path("请输入压缩文件路径: "));
+                const fs::path archive_path = read_path("请输入压缩文件路径: ");
+                if (!std::cin && archive_path.empty()) {
+                    break;
+                }
+                const ArchivePaths paths = decompress_file(archive_path);
                 std::cout << "解压完成：\n" << "  输出文件    " << paths.decoded.string() << '\n';
             } else if (choice == "h" || choice == "help") {
                 // 帮助

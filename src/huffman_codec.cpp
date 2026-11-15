@@ -1,7 +1,6 @@
 #include "huffman_codec.h"
 #include "bit_stream.h"
 
-#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <fstream>
@@ -20,17 +19,48 @@ namespace {
     private:
         std::vector<TreeHandle> items_;
 
-        struct Compare {
-            bool operator()(const TreeHandle &left, const TreeHandle &right) const {
-                return left->weight() > right->weight();
+        void sift_up(std::size_t index) {
+            while (index > 0) {
+                const std::size_t parent = (index - 1) / 2;
+                if (items_[index]->weight() >= items_[parent]->weight()) {
+                    break;
+                }
+                std::swap(items_[index], items_[parent]);
+                index = parent;
             }
-        };
+        }
+
+        void sift_down(std::size_t index) {
+            const std::size_t count = items_.size();
+            while (true) {
+                const std::size_t left = index * 2 + 1;
+                if (left >= count) {
+                    break;
+                }
+
+                std::size_t smallest = left;
+                const std::size_t right = left + 1;
+                if (right < count &&
+                    items_[right]->weight() < items_[left]->weight()) {
+                    smallest = right;
+                }
+
+                if (items_[index]->weight() <= items_[smallest]->weight()) {
+                    break;
+                }
+
+                std::swap(items_[index], items_[smallest]);
+                index = smallest;
+            }
+        }
 
     public:
-
         void push(TreeHandle tree) {
+            if (tree == nullptr) {
+                throw std::invalid_argument("不能向小根堆插入空子树");
+            }
             items_.push_back(std::move(tree));
-            std::push_heap(items_.begin(), items_.end(), Compare{});
+            sift_up(items_.size() - 1);
         }
 
         TreeHandle pop() {
@@ -38,9 +68,14 @@ namespace {
                 throw std::runtime_error("哈夫曼子树堆为空");
             }
 
-            std::pop_heap(items_.begin(), items_.end(), Compare{});
-            TreeHandle result = std::move(items_.back());
-            items_.pop_back();
+            TreeHandle result = std::move(items_.front());
+            if (items_.size() > 1) {
+                items_.front() = std::move(items_.back());
+                items_.pop_back();
+                sift_down(0);
+            } else {
+                items_.pop_back();
+            }
             return result;
         }
 
@@ -346,9 +381,9 @@ ArchivePaths compress_file(const fs::path &input_path) {
         calculate_payload_bits(frequencies, codes)
     };
 
-    // 创建树配置文件
-    std::ofstream shape(paths.shape, std::ios::trunc);
-    std::ofstream leaves(paths.leaves, std::ios::trunc);
+    // 创建树配置文件（leaves 使用二进制模式避免 Windows 下换行符转换）
+    std::ofstream shape(paths.shape, std::ios::binary | std::ios::trunc);
+    std::ofstream leaves(paths.leaves, std::ios::binary | std::ios::trunc);
     if (!shape || !leaves) {
         throw std::ios_base::failure("无法创建树配置文件");
     }

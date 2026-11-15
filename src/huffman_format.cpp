@@ -1,12 +1,14 @@
 #include "huffman_format.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <ios>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace fs = std::filesystem;
 using Node = HuffNode<Byte>;
@@ -66,37 +68,74 @@ namespace {
         return value;
     }
 
-    // 递归从文件生成树结构
+    // 迭代从文件还原树结构，避免畸形 config1.txt 触发深层递归栈溢出
     std::unique_ptr<Node> parse_tree_node(FILE *shape, FILE *leaves) {
-        // config1 按先序保存树形：1 表示内部节点，0 表示叶节点。
-        const int marker = std::fgetc(shape);
-        if (marker == EOF) {
-            throw std::runtime_error("树结构文件提前结束");
-        }
+        constexpr std::size_t kMaxLeaves = 256;
 
-        if (marker == '0') {
+        struct BuildFrame {
+            std::unique_ptr<Node> left;
+        };
+
+        std::vector<BuildFrame> stack;
+        std::unique_ptr<Node> root;
+        std::size_t open_slots = 1;
+        std::size_t leaves_seen = 0;
+
+        // config1 按先序保存树形：1 表示内部节点，0 表示叶节点。
+        while (open_slots > 0) {
+            const int marker = std::fgetc(shape);
+            if (marker == EOF) {
+                throw std::runtime_error("树结构文件提前结束");
+            }
+
+            if (marker == '1') {
+                ++open_slots;
+                if (leaves_seen + open_slots > kMaxLeaves) {
+                    throw std::runtime_error("树结构规模超过最大叶节点数限制");
+                }
+                stack.push_back(BuildFrame{nullptr});
+                continue;
+            }
+
+            if (marker != '0') {
+                throw std::runtime_error("树结构文件包含非法标记");
+            }
+
             const int value = std::fgetc(leaves);
             if (value == EOF) {
                 throw std::runtime_error("叶节点信息文件提前结束");
             }
 
-            return std::make_unique<LeafNode<Byte> >(
+            --open_slots;
+            ++leaves_seen;
+
+            std::unique_ptr<Node> current = std::make_unique<LeafNode<Byte> >(
                 static_cast<Byte>(value),
                 0
             );
+
+            while (!stack.empty()) {
+                if (stack.back().left == nullptr) {
+                    stack.back().left = std::move(current);
+                    break;
+                }
+
+                current = std::make_unique<IntlNode<Byte> >(
+                    std::move(stack.back().left),
+                    std::move(current)
+                );
+                stack.pop_back();
+            }
+
+            if (stack.empty()) {
+                root = std::move(current);
+            }
         }
 
-        if (marker != '1') {
-            throw std::runtime_error("树结构文件包含非法标记");
+        if (root == nullptr) {
+            throw std::logic_error("树结构解析结果为空");
         }
-
-        auto left = parse_tree_node(shape, leaves);
-        auto right = parse_tree_node(shape, leaves);
-
-        return std::make_unique<IntlNode<Byte> >(
-            std::move(left),
-            std::move(right)
-        );
+        return root;
     }
 
     void write_tree_config_recursive(
@@ -192,11 +231,11 @@ TreeHandle GenHuffTreeByConfigFile(
 
 TreeHandle load_tree_config(const fs::path &shape_path,const fs::path &leaves_path) {
 
-    const FilePtr shape_file(std::fopen(shape_path.string().c_str(), "r"));
+    const FilePtr shape_file(std::fopen(shape_path.string().c_str(), "rb"));
     if (!shape_file) {
         throw std::runtime_error("无法打开树结构文件：" + shape_path.string());
     }
-    const FilePtr leaves_file(std::fopen(leaves_path.string().c_str(), "r"));
+    const FilePtr leaves_file(std::fopen(leaves_path.string().c_str(), "rb"));
     if (!leaves_file) {
         throw std::runtime_error("无法打开叶节点信息文件：" + leaves_path.string());
     }
