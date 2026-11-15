@@ -13,6 +13,11 @@
 #include <utility>
 #include "huffnode.h"
 
+// 说明
+// 1. 补充 explicit HuffTree(NodePtr root) 构造函数：教材原本只提供“单叶构造”和“双子树合并构造”，仅够编码建树使用；
+//    解压端从配置文件由底向上拼装出底层节点树后，需要直接将根节点句柄打包为 HuffTree 对象，故增加该构造入口
+// 2. 禁用拷贝、启用移动语义：HuffTree 独占整棵节点树的唯一所有权，禁用拷贝可杜绝整树深拷贝开销与所有权模糊；
+//    保留默认移动构造/移动赋值，支持树对象放入 std::vector<TreeHandle> 构成的小根堆中低成本交换所有权
 template<typename E>
 class HuffTree {
 private:
@@ -61,6 +66,8 @@ public:
 
     HuffNode<E> *root() const { return Root.get(); } // Get root
     [[nodiscard]] int weight() const {
+        // 正常构造的树 Root 必非空；若对象已被 std::move 转移所有权（例如子树合并入新父节点后），
+        // 其内部 Root 已置为 nullptr，此时不可再访问 weight()
         assert(Root != nullptr);
         return Root->weight();
     } // Root weight

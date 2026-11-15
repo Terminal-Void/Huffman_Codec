@@ -10,6 +10,14 @@
 #include <stdexcept>
 #include <utility>
 
+// 说明：
+// 1. 内存所有权改造：原版 IntlNode 持有裸指针 lc/rc，且未按现代 C++ 管理子节点生命周期
+//    在建树失败抛出异常或树重建时容易引发内存泄漏与浅拷贝双重释放
+//    故在保留原有类层次与虚函数接口的前提下，将左右子节点替换为 std::unique_ptr
+//    使整棵哈夫曼树满足 RAII 自动递归析构；left()/right() 仅返回只读观察裸指针用于遍历，不转移所有权
+// 2. 整型权重限制：基类接口规定 weight() 返回 32 位有符号 int（教材预设场景为普通文本）
+//    因此树节点能表示的最大总字节频次受限于 INT_MAX（约 2 GiB）；因需兼容作业指定的节点接口而未改动返回类型
+//    只在合并节点时显式拦截溢出
 template<typename E>
 class HuffNode {
 public:
@@ -27,6 +35,9 @@ private:
     NodePtr rc; // Right child
     int wgt; // Subtree weight
 
+    // 计算左右子树权重和并检测溢出：
+    // 因接口规定 weight() 返回有符号 int，而 C++ 标准中有符号整数溢出属于未定义行为（UB）
+    // 故在构造合并前显式检查空指针以及正负双向加法溢出
     static int sum_weights(const NodePtr &l, const NodePtr &r) {
         if (l == nullptr || r == nullptr) {
             throw std::invalid_argument("IntlNode: child node cannot be null");

@@ -62,6 +62,9 @@ namespace {
         }
 
         std::string_view path_view = trim_ascii(line);
+        // 终端中拖拽文件输入路径时，Shell 往往会自动包裹成对单引号或双引号
+        // 当首尾同时出现成对匹配的引号时剥离最外层引号
+        // 防止误伤文件名本身合法包含的单个引号字符
         if (path_view.size() >= 2 &&
             ((path_view.front() == '"' && path_view.back() == '"') ||
              (path_view.front() == '\'' && path_view.back() == '\''))) {
@@ -82,14 +85,14 @@ int main() {
     while (std::cout << "\n> " && std::getline(std::cin, line)) {
         const std::string_view choice = trim_ascii(line);
         if (choice.empty()) {
-            continue;
+            continue; // 处理空行
         }
         try {
             if (choice == "c" || choice == "compress") {
                 // 压缩
                 const fs::path input_path = read_path("请输入原文件路径: ");
                 if (!std::cin && input_path.empty()) {
-                    break;
+                    break; // 遇到 EOF 时直接终止会话
                 }
                 const ArchivePaths paths = compress_file(input_path);
                 std::cout << "压缩完成：\n"

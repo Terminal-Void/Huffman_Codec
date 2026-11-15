@@ -19,6 +19,9 @@ namespace bitio {
     };
 
     namespace detail {
+        // 构造低 bit_count 位全为 1 的位掩码
+        // C++ 标准规定无符号整数左移位数 >= 类型位宽（即 uint64_t{1} << 64）属于未定义行为（UB），
+        // 开启优化后编译器可能会省略移位结果导致掩码错误，必须在移位前特判 >= 64 的边界
         [[nodiscard]] constexpr std::uint64_t low_mask(
             const unsigned bit_count
         ) noexcept {
@@ -32,7 +35,7 @@ namespace bitio {
         }
     }
 
-    // output 由调用者持有；写入器只负责批量写入和刷新。
+    // output 由调用者持有；写入器只负责批量写入和刷新
     template<BitOrder Order = BitOrder::LSB>
     class BasicBitWriter {
     public:
@@ -52,7 +55,7 @@ namespace bitio {
             write_bits(byte, 8);
         }
 
-        // 写入 value 的低 bit_count 位。累积器满 32 位时立即追加四个字节。
+        // 写入 value 的低 bit_count 位累积器满 32 位时立即追加四个字节
         void write_bits(std::uint64_t value, unsigned bit_count) {
             if (bit_count > 64) {
                 throw std::invalid_argument(
@@ -64,14 +67,21 @@ namespace bitio {
             }
 
             while (bit_count != 0) {
+                // 采用 accumulator_ 低 32 位作为位拼接窗口，满 32 位即拆分为 4 个字节写入 64 KiB 输出缓冲；
+                // 每次截取 min(bit_count, room)，避免写入超出低 32 位边界
+                // （尤其避免 MSB 下 32U - buffered_bits_ - take 无符号下溢）
                 const unsigned room = 32U - buffered_bits_;
                 const unsigned take = bit_count < room ? bit_count : room;
 
                 if constexpr (Order == BitOrder::LSB) {
+                    // LSB（小端位序）：低位比特先进入当前字节的低位（bit 0），新读取的低位切片左移拼接在更高位；
+                    // 解码端 BasicBitReader<LSB> 按从低位到高位的顺序移出时即可原样恢复码字
                     accumulator_ |=
                             (value & detail::low_mask(take)) << buffered_bits_;
                     value >>= take;
                 } else {
+                    // MSB（大端位序）：先取 value 尚未写入的最高 take 位，从 32 位窗口高位（bit 31）向下对齐写入；
+                    // 对应解码端 BasicBitReader<MSB> 从高位到低位逐次左移取出
                     const unsigned shift = bit_count - take;
                     const std::uint64_t part =
                             (value >> shift) & detail::low_mask(take);
@@ -87,13 +97,15 @@ namespace bitio {
             }
         }
 
-        // 结束当前位段；最后一个字节不足的高位（或低位）补零。
+        // 结束当前位段；最后一个字节不足的高位（或低位）补零
         void flush() {
             if (buffered_bits_ >= 8) {
                 flush_bytes();
             }
 
             if (buffered_bits_ != 0) {
+                // accumulator_ 在构造及每次 flush_word/flush_bytes 移位清空后，剩余未填充比特位均维持为 0，
+                // 因此直接写出该末字节即等效于按字节对齐向后补零；这些填充位会在解码阶段由 original_size 自动截断
                 if constexpr (Order == BitOrder::LSB) {
                     append_byte(static_cast<std::uint8_t>(accumulator_ & 0xffU));
                 } else {
@@ -198,11 +210,11 @@ namespace bitio {
         unsigned buffered_bits_ = 0;
     };
 
-    // 读取器借用输入流，不负责打开或关闭流。
+    // 读取器借用输入流，不负责打开或关闭流
     template<BitOrder Order = BitOrder::LSB>
     class BasicBitReader {
     public:
-        // byte_count 限制本次读取范围，避免读到载荷之后的内容。
+        // byte_count 限制本次读取范围，避免读到载荷之后的内容
         BasicBitReader(std::istream &input, const std::size_t byte_count) noexcept
             : source_(&input), source_remaining_(byte_count) {
         }
@@ -215,7 +227,7 @@ namespace bitio {
             return static_cast<std::uint8_t>(read_bits(8));
         }
 
-        // 一次读取超过 56 位时分两段处理，避免累积器移位越界。
+        // 一次读取超过 56 位时分两段处理，避免累积器移位越界
         [[nodiscard]] std::uint64_t read_bits(const unsigned bit_count) {
             if (bit_count > 64) {
                 throw std::invalid_argument(
@@ -226,6 +238,10 @@ namespace bitio {
                 return 0;
             }
 
+            // 累加器不变式说明：ensure() 每次从输入缓冲以“整字节（8 位）”为单位向 uint64_t 补齐数据
+            // 由于读取前 accumulator_ 内可能仍残留 1~7 个未读完的余位，
+            // 仅当 buffered_bits_ <= 56 时再并入 1 字节才不会超出 64 位上限，
+            // 故 ensure() 最多只能安全保证累加器中存在 56 位连续数据；单次请求 57~64 位时须拆成两次读取再按位序合并
             if (bit_count > 56) {
                 if constexpr (Order == BitOrder::LSB) {
                     const std::uint64_t low = read_bits(32);
@@ -252,7 +268,7 @@ namespace bitio {
             return result;
         }
 
-        // 预览后续位；补充缓存不会推进逻辑读取位置。
+        // 预览后续位；补充缓存不会推进逻辑读取位置
         [[nodiscard]] std::uint64_t peek_bits(const unsigned bit_count) {
             if (bit_count > 56) {
                 throw std::invalid_argument(
@@ -301,6 +317,8 @@ namespace bitio {
     private:
         static constexpr std::size_t kInputBufferSize = 64U * 1024U;
 
+        // 从输入流分块预读至多 64 KiB 进入内部缓冲区，大幅减少逐字节读流的系统调用与虚函数开销；
+        // 单次请求字节数受限于 source_remaining_，将读取边界隔离在本次压缩数据段以内
         void refill_source() {
             assert(source_ != nullptr);
             if (source_remaining_ == 0 || source_short_) {
@@ -331,12 +349,14 @@ namespace bitio {
             current_ = source_buffer_.data();
             end_ = current_ + received_size;
 
-            // 短读得到的字节仍可消费；下一次补充时报告输入截断。
+            // 短读得到的字节仍可消费；下一次补充时报告输入截断
             if (source_short_ && !source_->bad()) {
                 source_->clear();
             }
         }
 
+        // 保证累加器中至少存有 required 个待读比特（required <= 56）
+        // 每次从输入缓冲压入 1 字节前必满足 buffered_bits_ <= 56，从而保证累加器左/右移不会溢出 64 位宽度
         void ensure(const unsigned required) {
             while (buffered_bits_ < required) {
                 if (current_ == end_) {

@@ -146,8 +146,8 @@ TEST_CASE("二进制字节、缓冲区边界与中文路径", "[codec]") {
 
     SECTION("UTF-8 中文内容与带空格中文文件名") {
         const std::string chinese =
-            "数据结构实验二：Huffman 编码压缩与解压缩测试文本。\n"
-            "数据结构实验二：Huffman 编码压缩与解压缩测试文本。\n";
+            "数据结构实验二：Huffman 编码压缩与解压缩测试文本\n"
+            "数据结构实验二：Huffman 编码压缩与解压缩测试文本\n";
         verify_roundtrip_bytes(tmp, "测试 文本.txt", testutil::to_bytes(chinese));
     }
 }
