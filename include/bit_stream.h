@@ -318,7 +318,8 @@ namespace bitio {
         static constexpr std::size_t kInputBufferSize = 64U * 1024U;
 
         // 从输入流分块预读至多 64 KiB 进入内部缓冲区，大幅减少逐字节读流的系统调用与虚函数开销；
-        // 单次请求字节数受限于 source_remaining_，将读取边界隔离在本次压缩数据段以内
+        // 单次请求字节数受限于 source_remaining_
+        // 读取边界隔离在本次压缩数据段以内
         void refill_source() {
             assert(source_ != nullptr);
             if (source_remaining_ == 0 || source_short_) {

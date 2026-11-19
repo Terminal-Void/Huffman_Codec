@@ -24,23 +24,22 @@ namespace {
     // 打印帮助
     void print_help() {
         std::cout << R"(
-[USAGE & WORKFLOW]
-  c, compress:
-    - Input  : Text file path (the assignment uses letter-based text files)
-    - Output : Three files are created beside the input file.
-               Their actual paths are printed after compression.
+  [COMMANDS]
+    c, compress    Compress any file into archive & sidecars
+      ├─ Input     Source path (quotes auto-stripped)
+      └─ Output    <file>.huf           Bitstream archive (HUF1)
+                   <file>.config1.txt   Sidecar shape file
+                   <file>.config2.txt   Sidecar leaves file
 
-  x, extract:
-    - Input  : Compressed archive path (.huf)
-    - Rebuild: The tree is reconstructed from the two sidecar files.
-    - Output : The restored file keeps the original extension.
-               Its actual path is printed after extraction.
+    x, extract     Decompress archive & restore original file
+      ├─ Input     <file>.huf           Bitstream archive
+      ├─ Requires  <file>.config1.txt   Sidecar shape file
+      │            <file>.config2.txt   Sidecar leaves file
+      └─ Output    <name>.decoded<ext>  Restored original file
 
-  h, help:
-    - Print this help.
+    h, help        Show this help
+    q, quit, exit  Exit
 
-  q, quit, exit:
-    - Terminate current session.
 )";
     }
 

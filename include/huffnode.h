@@ -11,13 +11,16 @@
 #include <utility>
 
 // 说明：
-// 1. 内存所有权改造：原版 IntlNode 持有裸指针 lc/rc，且未按现代 C++ 管理子节点生命周期
-//    在建树失败抛出异常或树重建时容易引发内存泄漏与浅拷贝双重释放
-//    故在保留原有类层次与虚函数接口的前提下，将左右子节点替换为 std::unique_ptr
-//    使整棵哈夫曼树满足 RAII 自动递归析构；left()/right() 仅返回只读观察裸指针用于遍历，不转移所有权
-// 2. 整型权重限制：基类接口规定 weight() 返回 32 位有符号 int（教材预设场景为普通文本）
-//    因此树节点能表示的最大总字节频次受限于 INT_MAX（约 2 GiB）；因需兼容作业指定的节点接口而未改动返回类型
-//    只在合并节点时显式拦截溢出
+// 1. 生命周期与所有权改造：作业所给定的 HuffNode/IntlNode/HuffTree 实现全程使用裸指针，
+//    且 ~HuffTree() 为空、IntlNode 无析构函数，整棵树一旦使用完成便会直接内存泄漏；
+//    同时原版合并子树时直接共享 l->root()/r->root() 而不置空原句柄，若仅简单补写 delete 又会触发双重释放
+//    故在保留类层次与 virtual weight()/isLeaf() 接口的前提下，配合 HuffTree::Root 将 lc/rc 统一改为 std::unique_ptr 独占管理：
+//    子树合并、setLeft/setRight 覆盖旧子节点以及整树析构均由 RAII 自动完成所有权转移与释放；
+//    left()/right() 返回非所有权观察裸指针（保持非 const，以便遍历时继续调用非 const 的 weight()/isLeaf()），不转移所有权。
+// 2. 整型权重与空指针检查：基类接口规定 weight() 返回 32 位有符号 int（教材预设场景为普通文本），
+//    树节点能表示的最大总字节频次受限于 INT_MAX（约 2 GiB）；为兼容作业指定的节点接口未改动返回类型
+//    另原版 IntlNode 构造时直接解引用 l/r 且 setLeft/setRight 未重算 wgt；
+//    本实现经 sum_weights 统一检查空子指针、有符号 int 加法溢出，并在替换左右孩子时同步更新 wgt
 template<typename E>
 class HuffNode {
 public:
@@ -61,9 +64,17 @@ public:
     int weight() override { return wgt; }
     bool isLeaf() override { return false; }
     HuffNode<E> *left() const { return lc.get(); }
-    void setLeft(NodePtr b) { lc = std::move(b); }
+    void setLeft(NodePtr b) {
+        const int new_weight = sum_weights(b, rc);
+        lc = std::move(b);
+        wgt = new_weight;
+    }
     HuffNode<E> *right() const { return rc.get(); }
-    void setRight(NodePtr b) { rc = std::move(b); }
+    void setRight(NodePtr b) {
+        const int new_weight = sum_weights(lc, b);
+        rc = std::move(b);
+        wgt = new_weight;
+    }
 };
 
 template<typename E> // Leaf node subclass

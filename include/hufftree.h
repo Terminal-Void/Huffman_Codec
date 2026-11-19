@@ -13,11 +13,14 @@
 #include <utility>
 #include "huffnode.h"
 
-// 说明
-// 1. 补充 explicit HuffTree(NodePtr root) 构造函数：教材原本只提供“单叶构造”和“双子树合并构造”，仅够编码建树使用；
-//    解压端从配置文件由底向上拼装出底层节点树后，需要直接将根节点句柄打包为 HuffTree 对象，故增加该构造入口
-// 2. 禁用拷贝、启用移动语义：HuffTree 独占整棵节点树的唯一所有权，禁用拷贝可杜绝整树深拷贝开销与所有权模糊；
-//    保留默认移动构造/移动赋值，支持树对象放入 std::vector<TreeHandle> 构成的小根堆中低成本交换所有权
+// 说明：
+// 1. 所有权与析构修复：作业要求提供的实现中 Root 为裸指针且 ~HuffTree() 为空、合并构造 HuffTree(HuffTree*, HuffTree*)
+//    直接将 l->root()/r->root() 挂入新 IntlNode 而不转移或置空原句柄，外层 delete 子树壳子完全依赖析构为空，导致整树内存泄漏；
+//    因此将 Root 改为 std::unique_ptr<HuffNode<E>>，~HuffTree() = default 递归析构，合并构造改为接收 unique_ptr<HuffTree<E>>
+//    并通过 std::move(l->Root)/std::move(r->Root) 显式移交所有权；同时禁用拷贝、启用默认移动语义，防止浅拷贝冲突。
+//    root() 仅返回非所有权观察裸指针，非 const 以兼容基类非 const 虚函数调用
+// 2. 构造接口完善：原版叶子构造 HuffTree(E& val, int freq) 使用非 const 引用导致无法直接传入临时右值，改为 const E&；
+//    并补充 explicit HuffTree(NodePtr root)，供解压端从配置文件拼装好底层节点后直接打包为 HuffTree 对象
 template<typename E>
 class HuffTree {
 private:

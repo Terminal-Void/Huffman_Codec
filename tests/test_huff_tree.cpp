@@ -29,6 +29,7 @@ TEST_CASE("哈夫曼节点基本操作与异常检查", "[hufftree]") {
         parent.setRight(std::make_unique<LeafNode<Byte>>(Byte{'D'}, 9));
         REQUIRE(parent.left()->weight() == 8);
         REQUIRE(parent.right()->weight() == 9);
+        REQUIRE(parent.weight() == 17);
     }
 
     SECTION("空子节点与权重溢出异常") {
